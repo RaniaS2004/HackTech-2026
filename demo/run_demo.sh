@@ -1,12 +1,31 @@
 #!/bin/bash
 set -e
-source ../.venv-fgsm/bin/activate
-set -a
-source ../.env.local
-set +a
+VENV_PATH="../.venv-fgsm"
+if [ ! -f "${VENV_PATH}/bin/activate" ] && [ -f "../fgsm-service/.venv-fgsm/bin/activate" ]; then
+  VENV_PATH="../fgsm-service/.venv-fgsm"
+fi
 
-if [ -z "${OPENAI_API_KEY:-}" ]; then
-  echo "OPENAI_API_KEY is required."
+if [ ! -f "${VENV_PATH}/bin/activate" ]; then
+  echo "Python virtualenv not found. Install requirements into .venv-fgsm first."
+  exit 1
+fi
+
+source "${VENV_PATH}/bin/activate"
+if [ -f ../.env.local ]; then
+  set -a
+  source ../.env.local
+  set +a
+fi
+
+: "${K2_BASE_URL:=https://api.k2think.ai/v1}"
+: "${K2_MODEL:=MBZUAI-IFM/K2-Think-v2}"
+: "${BROWSER_USE_LLM_BASE_URL:=${K2_BASE_URL}}"
+: "${BROWSER_USE_PRIMARY_MODEL:=${K2_MODEL}}"
+: "${BROWSER_USE_FALLBACK_MODEL:=${BROWSER_USE_PRIMARY_MODEL}}"
+export K2_BASE_URL K2_MODEL BROWSER_USE_LLM_BASE_URL BROWSER_USE_PRIMARY_MODEL BROWSER_USE_FALLBACK_MODEL
+
+if [ -z "${K2_API_KEY:-}" ] && [ -z "${BROWSER_USE_LLM_API_KEY:-}" ]; then
+  echo "K2_API_KEY is required for the Browser Use LLM."
   exit 1
 fi
 
@@ -39,6 +58,9 @@ else
   echo "Browser Use local visible Chromium mode detected."
   echo "Demo URL: ${DEMO_BASE_URL:-http://localhost:3000}"
 fi
+echo "LLM base URL: ${BROWSER_USE_LLM_BASE_URL}"
+echo "Primary model: ${BROWSER_USE_PRIMARY_MODEL}"
+echo "Fallback model: ${BROWSER_USE_FALLBACK_MODEL}"
 echo ""
 echo "Running Agent 1: Attempting to pass HumanLock..."
 echo "Expected result: BLOCKED (bot-like behavior)"

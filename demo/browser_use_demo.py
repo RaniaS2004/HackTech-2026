@@ -7,6 +7,8 @@ from browser_use import Agent, BrowserSession, ChatOpenAI
 
 
 DEFAULT_LOCAL_BASE_URL = "http://localhost:3000"
+DEFAULT_K2_BASE_URL = "https://api.k2think.ai/v1"
+DEFAULT_K2_MODEL = "MBZUAI-IFM/K2-Think-v2"
 TRANSIENT_ERROR_MARKERS = (
     "502",
     "503",
@@ -31,14 +33,22 @@ def get_demo_url() -> str:
 
 
 def get_models() -> tuple[str, str]:
-    primary = os.environ.get("BROWSER_USE_PRIMARY_MODEL", "gpt-4o")
-    fallback = os.environ.get("BROWSER_USE_FALLBACK_MODEL", "gpt-4o-mini")
+    primary = os.environ.get("BROWSER_USE_PRIMARY_MODEL") or os.environ.get("K2_MODEL", DEFAULT_K2_MODEL)
+    fallback = os.environ.get("BROWSER_USE_FALLBACK_MODEL") or primary
     return primary, fallback
 
 
+def get_llm_base_url() -> str:
+    return os.environ.get("BROWSER_USE_LLM_BASE_URL") or os.environ.get("K2_BASE_URL", DEFAULT_K2_BASE_URL)
+
+
+def get_llm_api_key() -> str | None:
+    return os.environ.get("BROWSER_USE_LLM_API_KEY") or os.environ.get("K2_API_KEY")
+
+
 def validate_environment() -> None:
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY is required.")
+    if not get_llm_api_key():
+        raise RuntimeError("K2_API_KEY is required for the Browser Use LLM. Set BROWSER_USE_LLM_API_KEY only if overriding the provider.")
 
     if is_cloud_mode() and not os.environ.get("BROWSER_USE_API_KEY"):
         raise RuntimeError("BROWSER_USE_API_KEY is required when BROWSER_USE_USE_CLOUD=true.")
@@ -62,15 +72,20 @@ def create_browser_session() -> BrowserSession:
 
 def create_llms() -> tuple[ChatOpenAI, ChatOpenAI]:
     primary_model, fallback_model = get_models()
-    primary = ChatOpenAI(model=primary_model, api_key=os.environ["OPENAI_API_KEY"], max_completion_tokens=900)
-    fallback = ChatOpenAI(model=fallback_model, api_key=os.environ["OPENAI_API_KEY"], max_completion_tokens=500)
+    api_key = get_llm_api_key()
+    base_url = get_llm_base_url()
+    primary = ChatOpenAI(model=primary_model, api_key=api_key, base_url=base_url, max_completion_tokens=900)
+    fallback = ChatOpenAI(model=fallback_model, api_key=api_key, base_url=base_url, max_completion_tokens=500)
     return primary, fallback
 
 
 def print_run_header(name: str) -> None:
     mode = "cloud" if is_cloud_mode() else "local"
     primary_model, fallback_model = get_models()
-    print(f"[{name}] mode={mode} url={get_demo_url()} primary_model={primary_model} fallback_model={fallback_model}")
+    print(
+        f"[{name}] mode={mode} url={get_demo_url()} "
+        f"llm_base_url={get_llm_base_url()} primary_model={primary_model} fallback_model={fallback_model}"
+    )
 
 
 def is_transient_error(error: Exception) -> bool:

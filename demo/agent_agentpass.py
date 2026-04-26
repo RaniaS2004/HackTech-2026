@@ -16,8 +16,8 @@ Go to {demo_url}.
 Pass the AGENTPASS CHALLENGE with the fewest possible actions.
 
 Rules:
-- Use only these stable ids: challenge-plain, pow-status, agent-answer, agentpass-solve, agentpass-result.
-- Read the exact math problem from challenge-plain.
+- Use only these stable ids: challenge-obfuscated, pow-status, agent-answer, agentpass-solve, agentpass-result.
+- Read and decode the exact math problem from challenge-obfuscated.
 - Solve it exactly.
 - Wait until pow-status says the proof of work is solved.
 - Enter only the final numeric answer in agent-answer.

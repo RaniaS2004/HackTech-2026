@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 
 interface AgentPassChallengeEntry {
   answer: string;
@@ -13,23 +13,13 @@ declare global {
 
 const challengeStore = globalThis.__janusAgentPassChallenges ?? (globalThis.__janusAgentPassChallenges = new Map());
 const K2_BASE_URL = process.env.K2_BASE_URL ?? "https://api.k2think.ai/v1";
+const K2_MODEL = process.env.K2_MODEL ?? "MBZUAI-IFM/K2-Think-v2";
+const parsedK2TimeoutMs = Number.parseInt(process.env.AGENTPASS_K2_TIMEOUT_MS ?? "180000", 10);
+const K2_TIMEOUT_MS = Number.isFinite(parsedK2TimeoutMs) ? parsedK2TimeoutMs : 180_000;
 const PROMPT =
-  'You generate obfuscated multi-step math challenges for AI agent authentication. The problem must require at least 2 calculation steps and produce a non-obvious decimal or large integer answer that a human cannot solve mentally in under 30 seconds. Output ONLY raw JSON: {problem: string, answer: string, unit: string, obfuscated: string}. The obfuscated field must: spell all numbers as words in a random non-English language (Toki Pona, Swahili, or Welsh), alternate caps on every character, inject random symbols (*#~@!|) between every 2-3 words, and replace common letters with unicode lookalikes (a→ａ, e→ｅ, o→ｏ, i→ｉ). Example problem types: compound interest over multiple periods, geometric series sum with non-obvious ratio, two-variable distance/rate problems, currency conversion chains. The plain text problem field should be the clean English version judges can read.';
+  'You generate obfuscated multi-step math challenges for AI agent authentication. The problem must require at least 2 calculation steps and produce a non-obvious decimal or large integer answer that a human cannot solve mentally in under 30 seconds. Output ONLY raw JSON: {problem: string, answer: string, unit: string, obfuscated: string}. The obfuscated field must: spell all numbers as words in a random non-English language (Toki Pona, Swahili, or Welsh), alternate caps on every character, inject random symbols (*#~@!|) between every 2-3 words, and replace common letters with unicode lookalikes (a→ａ, e→ｅ, o→ｏ, i→ｉ). Example problem types: compound interest over multiple periods, geometric series sum with non-obvious ratio, two-variable distance/rate problems, currency conversion chains. The problem field should be the clean English source problem for server-side bookkeeping only.';
 const USER_MESSAGE =
   "Generate a new unique challenge now. Vary the type each time between: train/distance problems, geometric series, river crossing, compound interest, unit conversion, combinatorics.";
-
-const FALLBACK_CHALLENGES = [
-  { problem: "A train travels 80 mph for 3 hours. How far?", answer: "240", unit: "miles", obfuscated: "Α~ tＲaIＮ tＲaVｅLs 8#0 mＰＨ fＯR 3* h0UＲs. HＯW fＡＲ?" },
-  { problem: "The geometric series 3, 9, 27... what is the 6th term?", answer: "729", unit: "", obfuscated: "ＴhＥ gＥＯmＥＴＲiＣ ~3, 9, 2#7... WＨΑＴ iＳ tＨE 6ＴＨ tＥＲm?" },
-  { problem: "A boat crosses a river in 30 minutes at 12 km/h. How wide is the river?", answer: "6", unit: "km", obfuscated: "Α bＯΑＴ cＲＯＳＳｅＳ a #rIvＥＲ iＮ 3*0 mＩＮ aＴ 12 kＭ/h. HＯW wＩＤＥ?" },
-  { problem: "What is the final amount on $100 at 10% annual interest compounded once?", answer: "110", unit: "dollars", obfuscated: "ＷhＡＴ iＳ tＨE fＩＮＡl aＭＯＵＮＴ 0Ｎ $1*00 aＴ 1#0% iＮＴｅＲＥＳＴ?" },
-  { problem: "Convert 2.5 hours into minutes.", answer: "150", unit: "minutes", obfuscated: "ＣＯＮvＥＲＴ 2.5 hＯＵＲＳ iＮＴＯ mＩＮＵＴＥＳ~?" },
-  { problem: "How many 2-person teams can be formed from 6 people?", answer: "15", unit: "teams", obfuscated: "ＨＯＷ mＡＮＹ 2-ＰＥＲＳＯＮ tＥＡmＳ fＲＯＭ 6 pＥＯＰＬＥ?" },
-  { problem: "A runner goes 5 km north and 12 km east. How far from start?", answer: "13", unit: "km", obfuscated: "Α ＲＵＮＮＥＲ gＯＥＳ 5 kＭ nＯＲＴＨ & 1#2 kＭ eＡＳＴ. HＯＷ fＡＲ?" },
-  { problem: "If 4 machines make 20 parts in an hour, how many parts do 6 machines make?", answer: "30", unit: "parts", obfuscated: "ＩＦ 4 mＡＣＨＩＮＥＳ mＡＫＥ 20 pＡＲＴＳ/h, HＯＷ mΑＮＹ dＯ 6?" },
-  { problem: "What is 15% of 260?", answer: "39", unit: "", obfuscated: "ＷＨＡＴ iＳ 1#5% 0Ｆ 26*0?" },
-  { problem: "There are 8 choose 3 combinations. How many?", answer: "56", unit: "", obfuscated: "ＴＨＥＲＥ ΑＲＥ 8 cＨＯＯＳＥ 3 cＯＭＢＯＳ. HＯＷ mΑＮＹ?" },
-];
 
 function cleanupExpired() {
   const now = Date.now();
@@ -69,7 +59,7 @@ async function fetchK2Challenge(signal?: AbortSignal) {
       Authorization: `Bearer ${process.env.K2_API_KEY}`,
     },
     body: JSON.stringify({
-      model: "MBZUAI-IFM/K2-Think-v2",
+      model: K2_MODEL,
       stream: false,
       messages: [
         { role: "system", content: PROMPT },
@@ -90,84 +80,56 @@ async function fetchK2Challenge(signal?: AbortSignal) {
   return extractJsonObject(data.choices?.[0]?.message?.content ?? "");
 }
 
-async function fetchOpenAIChallenge(signal?: AbortSignal) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY missing");
-  }
-
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: PROMPT },
-        { role: "user", content: USER_MESSAGE },
-      ],
-      response_format: { type: "json_object" },
-    }),
-    cache: "no-store",
-    signal,
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI request failed with ${response.status}`);
-  }
-
-  const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+function normalizeChallenge(generated: {
+  problem?: string;
+  answer?: string;
+  unit?: string;
+  obfuscated?: string;
+}) {
+  const challenge = {
+    problem: String(generated.problem ?? "").trim(),
+    answer: String(generated.answer ?? "").trim(),
+    unit: String(generated.unit ?? "").trim(),
+    obfuscated: String(generated.obfuscated ?? "").trim(),
   };
-  return extractJsonObject(data.choices?.[0]?.message?.content ?? "");
+
+  if (!challenge.problem || !challenge.answer || !challenge.obfuscated) {
+    throw new Error("K2 response was missing required challenge fields");
+  }
+
+  return challenge;
 }
 
-export async function GET(req: NextRequest) {
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.name === "AbortError" ? `K2 request timed out after ${K2_TIMEOUT_MS}ms` : error.message;
+  }
+  return "Unknown K2 error";
+}
+
+export async function GET() {
   cleanupExpired();
-  const referer = req.headers.get("referer") ?? "";
-  const isDemoRequest = referer.includes("/demo");
+  let challenge: { answer: string; unit: string; obfuscated: string; problem: string };
 
-  let challenge: { answer: string; unit: string; obfuscated: string; problem: string } | null = null;
-  let source: "k2" | "openai" | "fallback" = "fallback";
-
+  const k2Controller = new AbortController();
+  const k2TimeoutId = setTimeout(() => k2Controller.abort(), K2_TIMEOUT_MS);
   try {
-    const k2Controller = new AbortController();
-    const k2TimeoutId = setTimeout(() => k2Controller.abort(), isDemoRequest ? 10_000 : 180_000);
     const generated = await fetchK2Challenge(k2Controller.signal);
-    clearTimeout(k2TimeoutId);
-    challenge = {
-      problem: String(generated.problem ?? "").trim(),
-      answer: String(generated.answer ?? "").trim(),
-      unit: String(generated.unit ?? "").trim(),
-      obfuscated: String(generated.obfuscated ?? "").trim(),
-    };
-    source = "k2";
+    challenge = normalizeChallenge(generated);
     console.log("[K2] success");
-  } catch {
-    console.log("[K2] failed");
-    try {
-      const openAiController = new AbortController();
-      const openAiTimeoutId = setTimeout(() => openAiController.abort(), isDemoRequest ? 10_000 : 60_000);
-      const generated = await fetchOpenAIChallenge(openAiController.signal);
-      clearTimeout(openAiTimeoutId);
-      challenge = {
-        problem: String(generated.problem ?? "").trim(),
-        answer: String(generated.answer ?? "").trim(),
-        unit: String(generated.unit ?? "").trim(),
-        obfuscated: String(generated.obfuscated ?? "").trim(),
-      };
-      source = "openai";
-    } catch {
-      const fallback = FALLBACK_CHALLENGES[Math.floor(Math.random() * FALLBACK_CHALLENGES.length)];
-      challenge = {
-        problem: fallback.problem,
-        answer: fallback.answer,
-        unit: fallback.unit,
-        obfuscated: fallback.obfuscated,
-      };
-      source = "fallback";
-    }
+  } catch (error) {
+    const message = getErrorMessage(error);
+    console.error("[K2] failed", message);
+    return NextResponse.json(
+      {
+        error: "AgentPass K2 challenge unavailable",
+        reason: message,
+        source: "k2",
+      },
+      { status: 503 },
+    );
+  } finally {
+    clearTimeout(k2TimeoutId);
   }
 
   const challengeId = crypto.randomUUID();
@@ -184,10 +146,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     challenge_id: challengeId,
     challenge: challenge.obfuscated,
-    problem: challenge.problem,
-    answer: challenge.answer,
-    unit: challenge.unit,
-    source,
+    source: "k2",
     expires_at: expiresAt,
   });
 }

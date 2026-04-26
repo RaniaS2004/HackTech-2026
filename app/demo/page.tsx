@@ -20,7 +20,6 @@ type HumanChallenge =
 type AgentChallenge = {
   challenge_id: string;
   challenge: string;
-  problem: string;
   expires_at: number;
 };
 
@@ -352,13 +351,6 @@ function AgentPassSection() {
           </div>
         </div>
 
-        <div>
-          <p className="mb-2 text-xs uppercase tracking-[0.22em] text-zinc-500">Plain text:</p>
-          <div id="challenge-plain" className="rounded-xl border border-zinc-800 bg-black/70 p-4 text-sm leading-relaxed text-zinc-200">
-            {challenge?.problem ?? "Loading plain problem..."}
-          </div>
-        </div>
-
         <div id="pow-status" className="rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-xs text-zinc-400">
           {powLabel}
         </div>
@@ -414,7 +406,7 @@ export default function DemoPage() {
           <h1 className="text-5xl font-bold tracking-[0.28em] text-white">JANUS DEMO</h1>
           <p className="mt-3 text-sm uppercase tracking-[0.24em] text-zinc-500">Live agent-vs-human adjudication surface for judging</p>
           <div className="mt-4 rounded-xl border border-zinc-800 bg-black/50 p-4 text-sm text-zinc-300">
-            Run the Browser Use tasks from the `demo/` scripts or Browser Use dashboard, targeting this page. This page is intentionally stable for agents: fixed IDs, plain-text AgentPass problem exposure, and full JSON verification outputs.
+            Run the Browser Use tasks from the `demo/` scripts or Browser Use dashboard, targeting this page. This page is intentionally stable for agents: fixed IDs, obfuscated AgentPass challenge exposure, and full JSON verification outputs.
           </div>
         </div>
         <HumanLockSection />

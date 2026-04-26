@@ -7,9 +7,6 @@ import { CheckIcon, KeyIcon, LoaderIcon, XIcon } from "./icons";
 type AgentChallenge = {
   challenge_id: string;
   challenge: string;
-  problem: string;
-  answer: string;
-  unit: string;
   source: "k2" | "openai" | "fallback";
   expires_at: number;
 };
@@ -288,9 +285,6 @@ export function AgentPassDemo() {
                   <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap text-primary">
                     {challenge?.challenge ?? "Loading obfuscated challenge..."}
                   </pre>
-                  <div className="mt-4 rounded-lg border border-border bg-background/70 p-3 text-muted-foreground">
-                    <span className="text-foreground">plain:</span> {challenge?.problem ?? "Waiting for challenge..."}
-                  </div>
                 </div>
 
                 <div className="mt-4 rounded-xl border border-border bg-background/70 px-4 py-3 font-mono text-xs text-muted-foreground">

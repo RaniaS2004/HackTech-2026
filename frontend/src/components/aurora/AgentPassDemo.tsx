@@ -5,9 +5,6 @@ import { apiUrl } from "@/lib/api";
 type AgentChallenge = {
   challenge_id: string;
   challenge: string;
-  problem: string;
-  answer: string;
-  unit: string;
   source: "k2" | "openai" | "fallback";
   expires_at: number;
 };

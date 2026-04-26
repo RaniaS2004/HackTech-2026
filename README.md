@@ -307,6 +307,7 @@ Visit:
 - `http://localhost:3000/humanlock`
 - `http://localhost:3000/agentpass`
 - `http://localhost:3000/demo`
+- `https://hack-tech-2026-2mbc.vercel.app/`
 
 ## Running the Demo Agents
 

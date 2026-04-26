@@ -50,6 +50,10 @@ type IdentityState = {
       latency_ms: number;
       pow_ms: number;
     };
+    solana?: {
+      signature: string;
+      explorer_url: string;
+    };
     token?: string | null;
     reason?: string;
   } | null;
@@ -363,7 +367,7 @@ function AgentPassPanel({ onResult }: { onResult: (value: IdentityState["agent"]
     setLoadingCursorVisible(true);
 
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 25_000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 180_000);
 
     try {
       const response = await fetch("/api/agentpass/challenge", {
@@ -382,7 +386,7 @@ function AgentPassPanel({ onResult }: { onResult: (value: IdentityState["agent"]
       startPow(data.challenge_id);
     } catch (loadError) {
       setChallengeState("error");
-      setError(loadError instanceof DOMException && loadError.name === "AbortError" ? "K2 Think V2 took more than 25 seconds." : "Failed to load agent challenge");
+      setError(loadError instanceof DOMException && loadError.name === "AbortError" ? "K2 Think V2 took more than 3 minutes." : "Failed to load agent challenge");
     } finally {
       window.clearTimeout(timeoutId);
     }
@@ -418,6 +422,10 @@ function AgentPassPanel({ onResult }: { onResult: (value: IdentityState["agent"]
         latency_ms: number;
         pow_ms: number;
       };
+      solana?: {
+        signature: string;
+        explorer_url: string;
+      };
       token?: string | null;
     };
 
@@ -426,6 +434,7 @@ function AgentPassPanel({ onResult }: { onResult: (value: IdentityState["agent"]
       const next = {
         passed: true,
         fingerprint: data.fingerprint,
+        solana: data.solana,
         token: data.token ?? null,
       };
       setDetails(next);
@@ -517,6 +526,18 @@ function AgentPassPanel({ onResult }: { onResult: (value: IdentityState["agent"]
           {details.passed
             ? `Verified as ${details.fingerprint?.model} (${Math.round((details.fingerprint?.confidence ?? 0) * 100)}% confidence)`
             : `Verification failed: ${details.reason}`}
+          {details.passed && details.solana ? (
+            <div className="mt-3">
+              <a
+                href={details.solana.explorer_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[#9945FF] underline"
+              >
+                View on Solana
+              </a>
+            </div>
+          ) : null}
         </div>
       )}
 

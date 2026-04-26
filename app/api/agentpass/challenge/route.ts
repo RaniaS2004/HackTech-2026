@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 interface AgentPassChallengeEntry {
   answer: string;
@@ -57,7 +57,7 @@ function extractJsonObject(content: string) {
   };
 }
 
-async function fetchK2Challenge() {
+async function fetchK2Challenge(signal?: AbortSignal) {
   if (!process.env.K2_API_KEY) {
     throw new Error("K2_API_KEY missing");
   }
@@ -77,6 +77,7 @@ async function fetchK2Challenge() {
       ],
     }),
     cache: "no-store",
+    signal,
   });
 
   if (!response.ok) {
@@ -89,7 +90,7 @@ async function fetchK2Challenge() {
   return extractJsonObject(data.choices?.[0]?.message?.content ?? "");
 }
 
-async function fetchOpenAIChallenge() {
+async function fetchOpenAIChallenge(signal?: AbortSignal) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY missing");
   }
@@ -109,6 +110,7 @@ async function fetchOpenAIChallenge() {
       response_format: { type: "json_object" },
     }),
     cache: "no-store",
+    signal,
   });
 
   if (!response.ok) {
@@ -121,15 +123,21 @@ async function fetchOpenAIChallenge() {
   return extractJsonObject(data.choices?.[0]?.message?.content ?? "");
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   cleanupExpired();
+  const referer = req.headers.get("referer") ?? "";
+  const isDemoRequest = referer.includes("/demo");
 
-  let challenge: { answer: string; unit: string; obfuscated: string } | null = null;
+  let challenge: { answer: string; unit: string; obfuscated: string; problem: string } | null = null;
   let source: "k2" | "openai" | "fallback" = "fallback";
 
   try {
-    const generated = await fetchK2Challenge();
+    const k2Controller = new AbortController();
+    const k2TimeoutId = setTimeout(() => k2Controller.abort(), isDemoRequest ? 10_000 : 180_000);
+    const generated = await fetchK2Challenge(k2Controller.signal);
+    clearTimeout(k2TimeoutId);
     challenge = {
+      problem: String(generated.problem ?? "").trim(),
       answer: String(generated.answer ?? "").trim(),
       unit: String(generated.unit ?? "").trim(),
       obfuscated: String(generated.obfuscated ?? "").trim(),
@@ -139,8 +147,12 @@ export async function GET() {
   } catch {
     console.log("[K2] failed");
     try {
-      const generated = await fetchOpenAIChallenge();
+      const openAiController = new AbortController();
+      const openAiTimeoutId = setTimeout(() => openAiController.abort(), isDemoRequest ? 10_000 : 60_000);
+      const generated = await fetchOpenAIChallenge(openAiController.signal);
+      clearTimeout(openAiTimeoutId);
       challenge = {
+        problem: String(generated.problem ?? "").trim(),
         answer: String(generated.answer ?? "").trim(),
         unit: String(generated.unit ?? "").trim(),
         obfuscated: String(generated.obfuscated ?? "").trim(),
@@ -149,6 +161,7 @@ export async function GET() {
     } catch {
       const fallback = FALLBACK_CHALLENGES[Math.floor(Math.random() * FALLBACK_CHALLENGES.length)];
       challenge = {
+        problem: fallback.problem,
         answer: fallback.answer,
         unit: fallback.unit,
         obfuscated: fallback.obfuscated,
@@ -159,7 +172,7 @@ export async function GET() {
 
   const challengeId = crypto.randomUUID();
   const issuedAt = Date.now();
-  const expiresAt = issuedAt + 120_000;
+  const expiresAt = issuedAt + 600_000;
 
   challengeStore.set(challengeId, {
     answer: challenge.answer,
@@ -171,6 +184,7 @@ export async function GET() {
   return NextResponse.json({
     challenge_id: challengeId,
     challenge: challenge.obfuscated,
+    problem: challenge.problem,
     answer: challenge.answer,
     unit: challenge.unit,
     source,

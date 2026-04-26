@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { mintAgentToken } from "@/lib/solana";
 
 interface AgentPassChallengeEntry {
   answer: string;
@@ -127,10 +128,22 @@ export async function POST(req: NextRequest) {
 
   challengeStore.delete(payload.challenge_id);
   const fingerprint = classifyAgent(payload.response_latency_ms, payload.pow_time_ms);
+  let solana: { signature: string; explorer_url: string } | undefined;
+
+  try {
+    const memo = await mintAgentToken(payload.challenge_id, fingerprint.model, fingerprint.confidence);
+    solana = {
+      signature: memo.signature,
+      explorer_url: memo.explorer,
+    };
+  } catch (error) {
+    console.error("[Solana] memo write failed", error);
+  }
 
   return NextResponse.json({
     passed: true,
     fingerprint,
     token: signAgentToken(payload.challenge_id, fingerprint.model),
+    solana,
   });
 }

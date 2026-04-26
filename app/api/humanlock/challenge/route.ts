@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { generateHumanLockFixtureChallenge } from "@/lib/humanlock-fixtures";
 
 const FGSM_SERVICE_URL = process.env.FGSM_SERVICE_URL ?? "http://127.0.0.1:8001";
 
@@ -38,11 +39,16 @@ export async function GET() {
       type: "image",
     });
   } catch {
-    const question = TEXT_CHALLENGES[Math.floor(Math.random() * TEXT_CHALLENGES.length)];
-    return NextResponse.json({
-      challenge_id: crypto.randomUUID(),
-      question,
-      type: "text",
-    });
+    try {
+      const fixture = await generateHumanLockFixtureChallenge();
+      return NextResponse.json(fixture);
+    } catch {
+      const question = TEXT_CHALLENGES[Math.floor(Math.random() * TEXT_CHALLENGES.length)];
+      return NextResponse.json({
+        challenge_id: crypto.randomUUID(),
+        question,
+        type: "text",
+      });
+    }
   }
 }

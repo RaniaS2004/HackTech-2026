@@ -14,6 +14,8 @@ declare global {
 const challengeStore = globalThis.__janusAgentPassChallenges ?? (globalThis.__janusAgentPassChallenges = new Map());
 const K2_BASE_URL = process.env.K2_BASE_URL ?? "https://api.k2think.ai/v1";
 const K2_MODEL = process.env.K2_MODEL ?? "MBZUAI-IFM/K2-Think-v2";
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 const parsedK2TimeoutMs = Number.parseInt(process.env.AGENTPASS_K2_TIMEOUT_MS ?? "180000", 10);
 const K2_TIMEOUT_MS = Number.isFinite(parsedK2TimeoutMs) ? parsedK2TimeoutMs : 180_000;
 const PROMPT =
@@ -47,37 +49,99 @@ function extractJsonObject(content: string) {
   };
 }
 
-async function fetchK2Challenge(signal?: AbortSignal) {
-  if (!process.env.K2_API_KEY) {
-    throw new Error("K2_API_KEY missing");
+function extractMessageContent(content: unknown) {
+  if (typeof content === "string") {
+    return content;
   }
 
-  const response = await fetch(`${K2_BASE_URL}/chat/completions`, {
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "text" in item && typeof item.text === "string") {
+          return item.text;
+        }
+        return "";
+      })
+      .join("");
+  }
+
+  return "";
+}
+
+async function fetchChatCompletion({
+  baseUrl,
+  apiKey,
+  model,
+  signal,
+  forceJsonObject = false,
+}: {
+  baseUrl: string;
+  apiKey: string | undefined;
+  model: string;
+  signal?: AbortSignal;
+  forceJsonObject?: boolean;
+}) {
+  if (!apiKey) {
+    throw new Error(`${model} API key missing`);
+  }
+
+  const body: {
+    model: string;
+    stream: false;
+    messages: Array<{ role: "system" | "user"; content: string }>;
+    response_format?: { type: "json_object" };
+  } = {
+    model,
+    stream: false,
+    messages: [
+      { role: "system", content: PROMPT },
+      { role: "user", content: USER_MESSAGE },
+    ],
+  };
+
+  if (forceJsonObject) {
+    body.response_format = { type: "json_object" };
+  }
+
+  const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.K2_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: K2_MODEL,
-      stream: false,
-      messages: [
-        { role: "system", content: PROMPT },
-        { role: "user", content: USER_MESSAGE },
-      ],
-    }),
+    body: JSON.stringify(body),
     cache: "no-store",
     signal,
   });
 
   if (!response.ok) {
-    throw new Error(`K2 request failed with ${response.status}`);
+    throw new Error(`${model} request failed with ${response.status}`);
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{ message?: { content?: unknown } }>;
   };
-  return extractJsonObject(data.choices?.[0]?.message?.content ?? "");
+  return extractJsonObject(extractMessageContent(data.choices?.[0]?.message?.content));
+}
+
+async function fetchK2Challenge(signal?: AbortSignal) {
+  return fetchChatCompletion({
+    baseUrl: K2_BASE_URL,
+    apiKey: process.env.K2_API_KEY,
+    model: K2_MODEL,
+    signal,
+  });
+}
+
+async function fetchOpenAIChallenge(signal?: AbortSignal) {
+  return fetchChatCompletion({
+    baseUrl: OPENAI_BASE_URL,
+    apiKey: process.env.OPENAI_API_KEY,
+    model: OPENAI_MODEL,
+    signal,
+    forceJsonObject: true,
+  });
 }
 
 function normalizeChallenge(generated: {
@@ -107,31 +171,7 @@ function getErrorMessage(error: unknown) {
   return "Unknown K2 error";
 }
 
-export async function GET() {
-  cleanupExpired();
-  let challenge: { answer: string; unit: string; obfuscated: string; problem: string };
-
-  const k2Controller = new AbortController();
-  const k2TimeoutId = setTimeout(() => k2Controller.abort(), K2_TIMEOUT_MS);
-  try {
-    const generated = await fetchK2Challenge(k2Controller.signal);
-    challenge = normalizeChallenge(generated);
-    console.log("[K2] success");
-  } catch (error) {
-    const message = getErrorMessage(error);
-    console.error("[K2] failed", message);
-    return NextResponse.json(
-      {
-        error: "AgentPass K2 challenge unavailable",
-        reason: message,
-        source: "k2",
-      },
-      { status: 503 },
-    );
-  } finally {
-    clearTimeout(k2TimeoutId);
-  }
-
+function issueChallenge(challenge: { answer: string; unit: string; obfuscated: string; problem: string }, source: "k2" | "openai") {
   const challengeId = crypto.randomUUID();
   const issuedAt = Date.now();
   const expiresAt = issuedAt + 600_000;
@@ -146,7 +186,66 @@ export async function GET() {
   return NextResponse.json({
     challenge_id: challengeId,
     challenge: challenge.obfuscated,
-    source: "k2",
+    source,
     expires_at: expiresAt,
   });
+}
+
+export async function GET() {
+  cleanupExpired();
+  let challenge: { answer: string; unit: string; obfuscated: string; problem: string } | null = null;
+  let source: "k2" | "openai" = "k2";
+  let k2FailureReason: string | null = null;
+
+  const k2Controller = new AbortController();
+  const k2TimeoutId = setTimeout(() => k2Controller.abort(), K2_TIMEOUT_MS);
+  try {
+    const generated = await fetchK2Challenge(k2Controller.signal);
+    challenge = normalizeChallenge(generated);
+    console.log("[K2] success");
+  } catch (error) {
+    k2FailureReason = getErrorMessage(error);
+    console.error("[K2] failed", k2FailureReason);
+  } finally {
+    clearTimeout(k2TimeoutId);
+  }
+
+  if (!k2FailureReason && challenge) {
+    return issueChallenge(challenge, source);
+  }
+
+  const openAiController = new AbortController();
+  const openAiTimeoutId = setTimeout(() => openAiController.abort(), K2_TIMEOUT_MS);
+  try {
+    const generated = await fetchOpenAIChallenge(openAiController.signal);
+    challenge = normalizeChallenge(generated);
+    source = "openai";
+    console.log("[OpenAI] fallback success");
+  } catch (error) {
+    const message = getErrorMessage(error);
+    console.error("[OpenAI] fallback failed", message);
+    return NextResponse.json(
+      {
+        error: "AgentPass challenge unavailable",
+        reason: `K2 failed: ${k2FailureReason}. OpenAI failed: ${message}.`,
+        source: "openai",
+      },
+      { status: 503 },
+    );
+  } finally {
+    clearTimeout(openAiTimeoutId);
+  }
+
+  if (!challenge) {
+    return NextResponse.json(
+      {
+        error: "AgentPass challenge unavailable",
+        reason: "Challenge generation returned no challenge payload.",
+        source,
+      },
+      { status: 503 },
+    );
+  }
+
+  return issueChallenge(challenge, source);
 }

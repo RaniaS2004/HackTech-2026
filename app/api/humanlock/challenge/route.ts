@@ -1,18 +1,48 @@
 import { NextResponse } from "next/server";
 
-const CHALLENGES = [
-  "Which of these would make a better first date: a museum or a bowling alley?",
-  "Complete this phrase a grandparent might say: Back in my day...",
-  "What emotion does the color burnt orange remind you of?",
+const FGSM_SERVICE_URL = process.env.FGSM_SERVICE_URL ?? "http://127.0.0.1:8001";
+
+const TEXT_CHALLENGES = [
+  "Which of these smells worse after rain: a wet dog or an old book?",
+  "What does the color yellow taste like to most people?",
+  "Which would a nervous person do first: check their phone or check their hair?",
+  "What sound does silence make when you're scared?",
+  "Which feels longer: five minutes in a waiting room or five minutes at a party?",
+  "Which apology sounds more sincere: 'my bad' or 'I really hurt you'?",
+  "What kind of laugh makes a room feel uncomfortable faster: too loud or too delayed?",
+  "Which object seems lonelier on a table: one key or one glove?",
 ];
 
 export async function GET() {
-  const prompt = CHALLENGES[Math.floor(Math.random() * CHALLENGES.length)];
+  try {
+    const response = await fetch(`${FGSM_SERVICE_URL}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+    });
 
-  return NextResponse.json({
-    challenge_id: crypto.randomUUID(),
-    type: "cultural",
-    prompt,
-    expires_at: Date.now() + 30000,
-  });
+    if (!response.ok) {
+      throw new Error(`FGSM service error ${response.status}`);
+    }
+
+    const data = (await response.json()) as {
+      challenge_id: string;
+      image_b64: string;
+      correct_label: string;
+      ai_sees: string;
+      epsilon: number;
+    };
+
+    return NextResponse.json({
+      ...data,
+      type: "image",
+    });
+  } catch {
+    const question = TEXT_CHALLENGES[Math.floor(Math.random() * TEXT_CHALLENGES.length)];
+    return NextResponse.json({
+      challenge_id: crypto.randomUUID(),
+      question,
+      type: "text",
+    });
+  }
 }

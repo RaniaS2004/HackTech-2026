@@ -1,92 +1,136 @@
+import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { writeMemory } from "@/lib/backboard";
 
-interface ChallengeEntry {
+interface AgentPassChallengeEntry {
   answer: string;
-  backboardThreadId: string | null;
+  unit: string;
+  issuedAt: number;
   expiresAt: number;
 }
 
 declare global {
-  // eslint-disable-next-line no-var
-  var __janusChallengMap: Map<string, ChallengeEntry> | undefined;
+  var __janusAgentPassChallenges: Map<string, AgentPassChallengeEntry> | undefined;
 }
 
-// ── Rule-based fingerprint classifier ────────────────────────────────────
-function classifyAgent(response_latency_ms: number): {
-  model: string;
-  confidence: number;
-  reasoning: string;
-} {
-  if (response_latency_ms < 300)
-    return { model: "k2", confidence: 0.85, reasoning: `${response_latency_ms}ms sub-300ms consistent with K2` };
-  if (response_latency_ms < 500)
-    return { model: "gemini", confidence: 0.79, reasoning: `${response_latency_ms}ms consistent with Gemini (~500ms)` };
-  if (response_latency_ms < 700)
-    return { model: "claude", confidence: 0.82, reasoning: `${response_latency_ms}ms consistent with Claude (~600ms)` };
-  if (response_latency_ms < 900)
-    return { model: "gpt-4o", confidence: 0.87, reasoning: `${response_latency_ms}ms consistent with GPT-4o (~800ms)` };
-  return { model: "unknown", confidence: 0.5, reasoning: `${response_latency_ms}ms outside known model latency ranges` };
+const challengeStore = globalThis.__janusAgentPassChallenges ?? (globalThis.__janusAgentPassChallenges = new Map());
+
+function cleanupExpired() {
+  const now = Date.now();
+  for (const [challengeId, entry] of challengeStore.entries()) {
+    if (entry.expiresAt <= now) {
+      challengeStore.delete(challengeId);
+    }
+  }
 }
 
-// ── Loose numeric equality: "150" == "150.0" == "150 miles" ───────────────
-function answersMatch(submitted: string, expected: string): boolean {
-  const norm = (s: string) => s.trim().toLowerCase().replace(/[^0-9.\-]/g, "");
-  const a = norm(submitted);
-  const b = norm(expected);
-  if (a === b) return true;
-  const na = parseFloat(a);
-  const nb = parseFloat(b);
-  if (!isNaN(na) && !isNaN(nb)) return Math.abs(na - nb) < 0.01;
-  return submitted.trim().toLowerCase() === expected.trim().toLowerCase();
+function base64Json(value: object) {
+  return Buffer.from(JSON.stringify(value)).toString("base64");
+}
+
+function signAgentToken(challengeId: string, model: string) {
+  const now = Date.now();
+  const header = base64Json({ typ: "JWT", alg: "HS256" });
+  const payload = base64Json({ sub: "agent", iat: now, jti: challengeId, model });
+  const signature = crypto
+    .createHmac("sha256", process.env.TOKEN_SECRET || "janus-secret")
+    .update(JSON.stringify({ challenge_id: challengeId, type: "agent", model, issued_at: now }))
+    .digest("hex");
+  return `${header}.${payload}.${signature}`;
+}
+
+function normalizeAnswer(value: string, unit: string) {
+  let normalized = value.trim().toLowerCase();
+  if (unit) {
+    normalized = normalized.replace(new RegExp(unit.toLowerCase(), "g"), "");
+  }
+  normalized = normalized.replace(/[a-z$,%]+/gi, "").trim();
+  return normalized;
+}
+
+function answersMatch(submitted: string, expected: string, unit: string) {
+  const normalizedSubmitted = normalizeAnswer(submitted, unit);
+  const normalizedExpected = normalizeAnswer(expected, unit);
+
+  const submittedNumber = Number.parseFloat(normalizedSubmitted);
+  const expectedNumber = Number.parseFloat(normalizedExpected);
+
+  if (!Number.isNaN(submittedNumber) && !Number.isNaN(expectedNumber)) {
+    return Math.abs(submittedNumber - expectedNumber) <= 0.1;
+  }
+
+  return normalizedSubmitted === normalizedExpected || submitted.trim().toLowerCase() === expected.trim().toLowerCase();
+}
+
+function rangeScore(value: number, min: number, max: number, points: number) {
+  return value >= min && value <= max ? points : 0;
+}
+
+function classifyAgent(responseLatencyMs: number, powTimeMs: number) {
+  const scores = [
+    {
+      model: "gpt-4o",
+      score: rangeScore(responseLatencyMs, 700, 950, 50) + rangeScore(powTimeMs, 300, 450, 30) + 20,
+    },
+    {
+      model: "claude",
+      score: rangeScore(responseLatencyMs, 500, 750, 50) + rangeScore(powTimeMs, 200, 350, 30),
+    },
+    {
+      model: "k2",
+      score: rangeScore(responseLatencyMs, 100, 300, 50) + rangeScore(powTimeMs, 100, 200, 30),
+    },
+    {
+      model: "gemini",
+      score: rangeScore(responseLatencyMs, 400, 600, 50) + rangeScore(powTimeMs, 250, 400, 30),
+    },
+  ].sort((left, right) => right.score - left.score);
+
+  const top = scores[0];
+  if (!top || top.score < 40) {
+    return {
+      model: "unknown",
+      confidence: 0.39,
+      latency_ms: responseLatencyMs,
+      pow_ms: powTimeMs,
+    };
+  }
+
+  return {
+    model: top.model,
+    confidence: top.score / 100,
+    latency_ms: responseLatencyMs,
+    pow_ms: powTimeMs,
+  };
 }
 
 export async function POST(req: NextRequest) {
-  const { challenge_id, answer, response_latency_ms } = await req.json();
+  cleanupExpired();
 
-  const challengeMap = globalThis.__janusChallengMap;
-  const entry = challengeMap?.get(challenge_id);
+  const payload = (await req.json()) as {
+    challenge_id: string;
+    answer: string;
+    response_latency_ms: number;
+    pow_time_ms: number;
+  };
 
-  // Unknown or expired challenge
-  if (!entry) {
-    return NextResponse.json({ passed: false, error: "Unknown or expired challenge" });
-  }
-  if (Date.now() > entry.expiresAt) {
-    challengeMap?.delete(challenge_id);
-    return NextResponse.json({ passed: false, error: "Challenge expired" });
-  }
-
-  const passed = answersMatch(String(answer), entry.answer);
-
-  if (!passed) {
-    return NextResponse.json({ passed: false });
+  const entry = challengeStore.get(payload.challenge_id);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    if (entry) challengeStore.delete(payload.challenge_id);
+    return NextResponse.json({ passed: false, reason: "challenge_expired" });
   }
 
-  // ── Consume the challenge (one-time use) ──────────────────────────────
-  challengeMap?.delete(challenge_id);
-
-  // ── Rule-based fingerprint ────────────────────────────────────────────
-  const fingerprint = classifyAgent(response_latency_ms ?? 750);
-
-  // ── Write reputation memory to Backboard (best-effort, non-blocking) ──
-  if (entry.backboardThreadId) {
-    const memLine =
-      `Agent verified at ${new Date().toISOString()}. ` +
-      `Fingerprint: ${fingerprint.model} (${fingerprint.confidence} confidence). ` +
-      `Latency: ${response_latency_ms}ms.`;
-    writeMemory(entry.backboardThreadId, memLine).catch(() => {
-      // non-fatal
-    });
+  const isCorrect = answersMatch(payload.answer, entry.answer, entry.unit);
+  if (!isCorrect) {
+    challengeStore.delete(payload.challenge_id);
+    return NextResponse.json({ passed: false, reason: "wrong_answer" });
   }
 
-  const token = Buffer.from(
-    JSON.stringify({
-      challenge_id,
-      model: fingerprint.model,
-      confidence: fingerprint.confidence,
-      issued_at: Date.now(),
-    })
-  ).toString("base64");
+  challengeStore.delete(payload.challenge_id);
+  const fingerprint = classifyAgent(payload.response_latency_ms, payload.pow_time_ms);
 
-  return NextResponse.json({ passed: true, fingerprint, token });
+  return NextResponse.json({
+    passed: true,
+    fingerprint,
+    token: signAgentToken(payload.challenge_id, fingerprint.model),
+  });
 }

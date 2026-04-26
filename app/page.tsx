@@ -1,378 +1,567 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-// ── Types ──────────────────────────────────────────────────────────────────
+type HumanChallenge =
+  | {
+      type: "image";
+      challenge_id: string;
+      image_b64: string;
+      correct_label: string;
+      ai_sees: string;
+      epsilon: number;
+    }
+  | {
+      type: "text";
+      challenge_id: string;
+      question: string;
+    };
 
-interface MouseSignals {
-  tremor_detected: boolean;
-  path_linearity: number;
-  click_time_ms: number;
+type AgentChallenge = {
+  challenge_id: string;
+  challenge: string;
+  expires_at: number;
+};
+
+type PowWorkerResult = {
+  nonce: number;
+  hash: string;
+  elapsed_ms: number;
+};
+
+type Point = {
+  x: number;
+  y: number;
+  t: number;
+};
+
+type IdentityState = {
+  human: {
+    passed: boolean;
+    score?: number;
+    breakdown?: object;
+    token?: string | null;
+  } | null;
+  agent: {
+    passed: boolean;
+    fingerprint?: {
+      model: string;
+      confidence: number;
+      latency_ms: number;
+      pow_ms: number;
+    };
+    token?: string | null;
+    reason?: string;
+  } | null;
+};
+
+const HUMANLOCK_LABELS = ["cat", "dog", "car", "bird", "chair", "apple", "banana", "clock", "shoe", "guitar"];
+
+function shuffle<T>(values: T[]) {
+  const copy = [...values];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const nextIndex = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[nextIndex]] = [copy[nextIndex], copy[index]];
+  }
+  return copy;
 }
 
-interface IdentityResult {
-  side: "human" | "agent";
-  passed: boolean;
-  score?: number;
-  fingerprint?: { model: string; confidence: number; reasoning?: string };
-  token?: string;
-  timestamp: number;
+function computeTremorScore(points: Point[]) {
+  if (points.length < 3) return 0;
+
+  let sumVelocityX = 0;
+  let sumVelocityY = 0;
+  let velocitySamples = 0;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const dt = Math.max(1, points[index].t - points[index - 1].t);
+    sumVelocityX += (points[index].x - points[index - 1].x) / dt;
+    sumVelocityY += (points[index].y - points[index - 1].y) / dt;
+    velocitySamples += 1;
+  }
+
+  if (velocitySamples === 0) return 0;
+
+  const meanVelocityX = sumVelocityX / velocitySamples;
+  const meanVelocityY = sumVelocityY / velocitySamples;
+  const velocityMagnitude = Math.hypot(meanVelocityX, meanVelocityY) || 1;
+  const normalX = -meanVelocityY / velocityMagnitude;
+  const normalY = meanVelocityX / velocityMagnitude;
+
+  let deviationTotal = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const dx = points[index].x - points[index - 1].x;
+    const dy = points[index].y - points[index - 1].y;
+    deviationTotal += Math.abs(dx * normalX + dy * normalY);
+  }
+
+  return Number((deviationTotal / (points.length - 1) / 25).toFixed(3));
 }
 
-// ── HumanLock Panel ────────────────────────────────────────────────────────
-
-function HumanLockPanel({ onResult }: { onResult: (r: IdentityResult) => void }) {
-  const [challenge, setChallenge] = useState<{ challenge_id: string; prompt: string } | null>(null);
+function HumanLockPanel({ onResult }: { onResult: (value: IdentityState["human"]) => void }) {
+  const [challenge, setChallenge] = useState<HumanChallenge | null>(null);
   const [answer, setAnswer] = useState("");
+  const [options, setOptions] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "pass" | "fail">("idle");
-  const [score, setScore] = useState<number | null>(null);
+  const [details, setDetails] = useState<{ score?: number; breakdown?: object; token?: string | null } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const mousePoints = useRef<{ x: number; y: number }[]>([]);
-  const mouseDownTime = useRef<number>(0);
-  const clickTimeMs = useRef<number>(500);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const pathPointsRef = useRef<Point[]>([]);
+  const clickStartRef = useRef<number | null>(null);
+  const clickTimeRef = useRef<number>(0);
 
-  useEffect(() => {
-    fetch("/api/humanlock/challenge")
-      .then((r) => r.json())
-      .then(setChallenge)
-      .catch(console.error);
+  const buildImageOptions = useCallback((correctLabel: string) => {
+    const wrongLabels = shuffle(HUMANLOCK_LABELS.filter((label) => label !== correctLabel)).slice(0, 3);
+    return shuffle([correctLabel, ...wrongLabels]);
   }, []);
 
-  const onMouseMove = useCallback((e: React.MouseEvent) => {
-    mousePoints.current.push({ x: e.clientX, y: e.clientY });
-    if (mousePoints.current.length > 100) mousePoints.current.shift();
-  }, []);
-
-  const onMouseDown = useCallback(() => {
-    mouseDownTime.current = Date.now();
-  }, []);
-
-  const onMouseUp = useCallback(() => {
-    if (mouseDownTime.current > 0) {
-      clickTimeMs.current = Date.now() - mouseDownTime.current;
-      mouseDownTime.current = 0;
-    }
-  }, []);
-
-  const computeSignals = (): MouseSignals => {
-    const pts = mousePoints.current;
-    if (pts.length < 5) {
-      return { tremor_detected: false, path_linearity: 0.5, click_time_ms: clickTimeMs.current };
-    }
-    const dists = pts.slice(1).map((p, i) => Math.hypot(p.x - pts[i].x, p.y - pts[i].y));
-    const mean = dists.reduce((a, b) => a + b, 0) / dists.length;
-    const stddev = Math.sqrt(dists.reduce((a, b) => a + (b - mean) ** 2, 0) / dists.length);
-    const tremor_detected = stddev > 3.5;
-    const first = pts[0];
-    const last = pts[pts.length - 1];
-    const straight = Math.hypot(last.x - first.x, last.y - first.y);
-    const pathLen = dists.reduce((a, b) => a + b, 0) || 1;
-    const path_linearity = Math.min(1, straight / pathLen);
-    return { tremor_detected, path_linearity, click_time_ms: clickTimeMs.current };
-  };
-
-  const handleSubmit = async () => {
-    if (!challenge || !answer.trim()) return;
-    setStatus("loading");
-    const signals = computeSignals();
-    try {
-      const res = await fetch("/api/humanlock/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ challenge_id: challenge.challenge_id, answer, mouse_signals: signals }),
-      });
-      const data = await res.json();
-      setStatus(data.passed ? "pass" : "fail");
-      setScore(data.score ?? null);
-      onResult({ side: "human", passed: data.passed, score: data.score, token: data.token, timestamp: Date.now() });
-    } catch {
-      setStatus("fail");
-    }
-  };
-
-  const refresh = () => {
+  const loadChallenge = useCallback(async () => {
     setStatus("idle");
     setAnswer("");
-    setScore(null);
-    mousePoints.current = [];
-    fetch("/api/humanlock/challenge")
-      .then((r) => r.json())
-      .then(setChallenge)
-      .catch(console.error);
-  };
+    setDetails(null);
+    setError(null);
+    pathPointsRef.current = [];
+    clickStartRef.current = null;
+    clickTimeRef.current = 0;
+
+    const response = await fetch("/api/humanlock/challenge", { cache: "no-store" });
+    const data = (await response.json()) as HumanChallenge;
+    setChallenge(data);
+    setOptions(data.type === "image" ? buildImageOptions(data.correct_label) : []);
+  }, [buildImageOptions]);
+
+  useEffect(() => {
+    loadChallenge().catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Failed to load challenge"));
+  }, [loadChallenge]);
+
+  const trackPoint = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const bounds = panelRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    pathPointsRef.current.push({
+      x: event.clientX - bounds.left,
+      y: event.clientY - bounds.top,
+      t: performance.now(),
+    });
+    if (pathPointsRef.current.length > 300) {
+      pathPointsRef.current.shift();
+    }
+  }, []);
+
+  const handleMouseDown = useCallback(() => {
+    clickStartRef.current = performance.now();
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    if (clickStartRef.current !== null) {
+      clickTimeRef.current = Math.round(performance.now() - clickStartRef.current);
+      clickStartRef.current = null;
+    }
+  }, []);
+
+  const handleSubmit = useCallback(async () => {
+    if (!challenge || !answer.trim()) return;
+    setStatus("loading");
+
+    const tremorScore = computeTremorScore(pathPointsRef.current);
+    const response = await fetch("/api/humanlock/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challenge_id: challenge.challenge_id,
+        answer,
+        type: challenge.type,
+        mouse_signals: {
+          path_points: pathPointsRef.current,
+          click_time_ms: clickTimeRef.current,
+          tremor_score: tremorScore,
+        },
+      }),
+    });
+
+    const data = (await response.json()) as {
+      passed: boolean;
+      score: number;
+      breakdown: object;
+      token: string | null;
+    };
+
+    setStatus(data.passed ? "pass" : "fail");
+    setDetails({ score: data.score, breakdown: data.breakdown, token: data.token });
+    onResult({
+      passed: data.passed,
+      score: data.score,
+      breakdown: data.breakdown,
+      token: data.token,
+    });
+  }, [answer, challenge, onResult]);
 
   return (
     <div
-      onMouseMove={onMouseMove}
-      onMouseDown={onMouseDown}
-      onMouseUp={onMouseUp}
-      className="flex-1 border border-orange-500/40 rounded-lg p-6 bg-[#0f0f0f] flex flex-col gap-4"
+      ref={panelRef}
+      onMouseMove={trackPoint}
+      onMouseDown={handleMouseDown}
+      onMouseUp={handleMouseUp}
+      className="flex-1 rounded-2xl border border-orange-500/40 bg-[#0f0f0f] p-6 flex flex-col gap-4"
     >
       <div>
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-orange-500 text-xl">👤</span>
-          <span className="text-orange-400 font-bold text-sm tracking-widest uppercase">HumanLock</span>
-        </div>
-        <p className="text-zinc-500 text-xs">Prove you&apos;re human</p>
+        <p className="text-orange-400 text-xs uppercase tracking-[0.25em]">HumanLock</p>
+        <h2 className="text-xl text-orange-100">Adversarial human verification</h2>
       </div>
 
-      <div className="border border-orange-500/20 rounded p-3 bg-black/40 min-h-[60px]">
-        <p className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Cultural Challenge</p>
-        <p className="text-orange-100 text-sm leading-relaxed">
-          {challenge ? challenge.prompt : "Loading challenge..."}
-        </p>
-      </div>
-
-      <div className="text-[10px] text-zinc-600 border border-zinc-800 rounded px-3 py-2 bg-black/20 flex gap-3">
-        <span className="text-zinc-500">mouse tracking active</span>
-        <span>·</span>
-        <span>{mousePoints.current.length} pts</span>
-        <span>·</span>
-        <span>click_time={clickTimeMs.current}ms</span>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <input
-          type="text"
-          value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-          placeholder="Your answer..."
-          className="bg-black border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-orange-500/60 transition-colors"
-        />
-        <button
-          onClick={handleSubmit}
-          disabled={status === "loading" || !challenge}
-          className="bg-orange-500/10 border border-orange-500/40 hover:bg-orange-500/20 text-orange-400 text-sm py-2 rounded transition-colors disabled:opacity-40 cursor-pointer"
-        >
-          {status === "loading" ? "Verifying..." : "Submit"}
-        </button>
-      </div>
-
-      {status === "pass" && (
-        <div className="flex items-center gap-2 text-green-400 text-sm border border-green-500/30 rounded p-3 bg-green-500/5">
-          <span>✓</span>
-          <span>Human verified{score !== null ? ` — score ${score}/100` : ""}</span>
-        </div>
-      )}
-      {status === "fail" && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2 text-red-400 text-sm border border-red-500/30 rounded p-3 bg-red-500/5">
-            <span>✗</span>
-            <span>Bot detected{score !== null ? ` — score ${score}/100` : ""}</span>
+      {challenge?.type === "image" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-zinc-300">What do you see?</p>
+          <img
+            src={`data:image/png;base64,${challenge.image_b64}`}
+            alt="HumanLock challenge"
+            width={280}
+            height={280}
+            className="w-[280px] max-w-full rounded-xl border border-zinc-800 bg-black"
+          />
+          <p className="text-xs text-zinc-500">
+            AI sees: {challenge.ai_sees} - ε={challenge.epsilon.toFixed(4)}
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            {options.map((option) => (
+              <button
+                key={option}
+                onClick={() => {
+                  setAnswer(option);
+                  clickTimeRef.current = clickTimeRef.current || 180;
+                }}
+                className={`rounded-lg border px-3 py-2 text-sm cursor-pointer transition-colors ${
+                  answer === option
+                    ? "border-orange-400 bg-orange-500/15 text-orange-100"
+                    : "border-zinc-700 bg-black text-zinc-300 hover:border-orange-500/50"
+                }`}
+              >
+                {option}
+              </button>
+            ))}
           </div>
-          <button onClick={refresh} className="text-xs text-zinc-500 hover:text-zinc-300 underline text-left cursor-pointer">
-            Try again
-          </button>
+        </div>
+      ) : challenge?.type === "text" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-zinc-300">{challenge.question}</p>
+          <input
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+            placeholder="Describe your answer"
+            className="rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-zinc-200 outline-none focus:border-orange-500/70"
+          />
+        </div>
+      ) : (
+        <div className="text-sm text-zinc-500">Loading HumanLock...</div>
+      )}
+
+      <div className="rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-xs text-zinc-500">
+        {pathPointsRef.current.length} tracked points · click {clickTimeRef.current || 0}ms · tremor{" "}
+        {computeTremorScore(pathPointsRef.current).toFixed(3)}
+      </div>
+
+      <button
+        onClick={() => handleSubmit().catch((submitError) => setError(submitError instanceof Error ? submitError.message : "Verification failed"))}
+        disabled={!challenge || !answer || status === "loading"}
+        className="rounded-lg border border-orange-500/40 bg-orange-500/10 px-4 py-3 text-sm text-orange-300 disabled:opacity-40 cursor-pointer"
+      >
+        {status === "loading" ? "Verifying..." : "Submit"}
+      </button>
+
+      {details && (
+        <div
+          className={`rounded-lg border p-3 text-sm ${
+            status === "pass"
+              ? "border-green-500/40 bg-green-500/10 text-green-300"
+              : "border-red-500/40 bg-red-500/10 text-red-300"
+          }`}
+        >
+          {status === "pass" ? "Human verified" : "Behavioral score too bot-like"} · score {details.score}
         </div>
       )}
+
+      {error && <div className="text-xs text-red-400">{error}</div>}
+
+      <button onClick={() => loadChallenge().catch(console.error)} className="text-left text-xs text-zinc-500 underline cursor-pointer">
+        New HumanLock challenge
+      </button>
     </div>
   );
 }
 
-// ── AgentPass Panel ────────────────────────────────────────────────────────
-
-function AgentPassPanel({ onResult }: { onResult: (r: IdentityResult) => void }) {
-  const [challenge, setChallenge] = useState<{
-    challenge_id: string;
-    challenge: string;
-    expires_at: number;
-  } | null>(null);
+function AgentPassPanel({ onResult }: { onResult: (value: IdentityState["agent"]) => void }) {
+  const [challenge, setChallenge] = useState<AgentChallenge | null>(null);
   const [answer, setAnswer] = useState("");
+  const [challengeState, setChallengeState] = useState<"loading" | "ready" | "error">("loading");
+  const [powState, setPowState] = useState<{ status: "idle" | "running" | "done"; elapsedMs?: number; dots: string }>({
+    status: "idle",
+    dots: "",
+  });
   const [status, setStatus] = useState<"idle" | "loading" | "pass" | "fail">("idle");
-  const [fingerprint, setFingerprint] = useState<{ model: string; confidence: number } | null>(null);
+  const [details, setDetails] = useState<IdentityState["agent"]>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loadingCursorVisible, setLoadingCursorVisible] = useState(true);
 
-  const loadChallenge = useCallback(() => {
-    setStatus("idle");
-    setAnswer("");
-    setFingerprint(null);
-    fetch("/api/agentpass/challenge")
-      .then((r) => r.json())
-      .then(setChallenge)
-      .catch(console.error);
+  const workerRef = useRef<Worker | null>(null);
+  const challengeLoadedAtRef = useRef<number>(0);
+
+  const startPow = useCallback((challengeId: string) => {
+    workerRef.current?.terminate();
+    const worker = new Worker("/pow-worker.js");
+    workerRef.current = worker;
+    setPowState({ status: "running", dots: "" });
+
+    worker.onmessage = (event: MessageEvent<PowWorkerResult>) => {
+      const elapsedMs = Number(event.data?.elapsed_ms);
+      setPowState({
+        status: "done",
+        elapsedMs: Number.isFinite(elapsedMs) ? elapsedMs : 0,
+        dots: "",
+      });
+      worker.terminate();
+      workerRef.current = null;
+    };
+
+    worker.onerror = () => {
+      setPowState({ status: "idle", dots: "" });
+      setError("Proof-of-work failed");
+      worker.terminate();
+      workerRef.current = null;
+    };
+
+    worker.postMessage({ prefix: challengeId, difficulty: 4 });
   }, []);
 
   useEffect(() => {
-    loadChallenge();
+    if (powState.status !== "running") return;
+    const timer = window.setInterval(() => {
+      setPowState((current) => ({
+        ...current,
+        dots: current.dots.length >= 3 ? "" : `${current.dots}.`,
+      }));
+    }, 400);
+    return () => window.clearInterval(timer);
+  }, [powState.status]);
+
+  useEffect(() => {
+    if (challengeState !== "loading") return;
+    const timer = window.setInterval(() => {
+      setLoadingCursorVisible((current) => !current);
+    }, 450);
+    return () => window.clearInterval(timer);
+  }, [challengeState]);
+
+  const loadChallenge = useCallback(async () => {
+    workerRef.current?.terminate();
+    setStatus("idle");
+    setAnswer("");
+    setChallenge(null);
+    setChallengeState("loading");
+    setDetails(null);
+    setError(null);
+    setPowState({ status: "idle", dots: "" });
+    setLoadingCursorVisible(true);
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 25_000);
+
+    try {
+      const response = await fetch("/api/agentpass/challenge", {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Challenge request failed with ${response.status}`);
+      }
+
+      const data = (await response.json()) as AgentChallenge;
+      setChallenge(data);
+      setChallengeState("ready");
+      challengeLoadedAtRef.current = performance.now();
+      startPow(data.challenge_id);
+    } catch (loadError) {
+      setChallengeState("error");
+      setError(loadError instanceof DOMException && loadError.name === "AbortError" ? "K2 Think V2 took more than 25 seconds." : "Failed to load agent challenge");
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }, [startPow]);
+
+  useEffect(() => {
+    loadChallenge().catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Failed to load agent challenge"));
+    return () => workerRef.current?.terminate();
   }, [loadChallenge]);
 
-  const handleSolve = async () => {
-    if (!challenge || !answer.trim()) return;
+  const handleSubmit = useCallback(async () => {
+    if (!challenge || !answer.trim() || powState.status !== "done") return;
     setStatus("loading");
-    try {
-      const res = await fetch("/api/agentpass/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          challenge_id: challenge.challenge_id,
-          answer,
-          response_latency_ms: 750,
-          pow_time_ms: 340,
-        }),
-      });
-      const data = await res.json();
-      if (data.passed) {
-        setFingerprint(data.fingerprint);
-        setStatus("pass");
-        onResult({ side: "agent", passed: true, fingerprint: data.fingerprint, token: data.token, timestamp: Date.now() });
-      } else {
-        setStatus("fail");
-        onResult({ side: "agent", passed: false, timestamp: Date.now() });
-      }
-    } catch {
+
+    const responseLatencyMs = Math.round(performance.now() - challengeLoadedAtRef.current);
+    const response = await fetch("/api/agentpass/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challenge_id: challenge.challenge_id,
+        answer,
+        response_latency_ms: responseLatencyMs,
+        pow_time_ms: powState.elapsedMs ?? 0,
+      }),
+    });
+
+    const data = (await response.json()) as {
+      passed: boolean;
+      reason?: string;
+      fingerprint?: {
+        model: string;
+        confidence: number;
+        latency_ms: number;
+        pow_ms: number;
+      };
+      token?: string | null;
+    };
+
+    if (data.passed) {
+      setStatus("pass");
+      const next = {
+        passed: true,
+        fingerprint: data.fingerprint,
+        token: data.token ?? null,
+      };
+      setDetails(next);
+      onResult(next);
+    } else {
       setStatus("fail");
+      const next = {
+        passed: false,
+        reason: data.reason,
+        token: data.token ?? null,
+      };
+      setDetails(next);
+      onResult(next);
     }
-  };
+  }, [answer, challenge, onResult, powState.elapsedMs, powState.status]);
+
+  const challengeLoaded = challengeState === "ready" && challenge !== null;
+  const powComplete = powState.status === "done";
+  const canSolve = challengeLoaded && powComplete && !!answer.trim() && status !== "loading";
+
+  const powLabel = useMemo(() => {
+    if (challengeState === "loading") {
+      return "Waiting for challenge...";
+    }
+    if (challengeState === "error") {
+      return "Proof-of-work unavailable until challenge loads.";
+    }
+    if (powState.status === "running") {
+      return `Computing proof-of-work${powState.dots}`;
+    }
+    if (powState.status === "done") {
+      return `PoW solved in ${powState.elapsedMs}ms`;
+    }
+    return "Waiting for challenge...";
+  }, [challengeState, powState.dots, powState.elapsedMs, powState.status]);
 
   return (
-    <div className="flex-1 border border-cyan-500/40 rounded-lg p-6 bg-[#0f0f0f] flex flex-col gap-4">
+    <div className="flex-1 rounded-2xl border border-cyan-500/40 bg-[#0f0f0f] p-6 flex flex-col gap-4">
       <div>
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-cyan-400 text-xl">🤖</span>
-          <span className="text-cyan-400 font-bold text-sm tracking-widest uppercase">AgentPass</span>
-        </div>
-        <p className="text-zinc-500 text-xs">Prove you&apos;re an agent</p>
+        <p className="text-cyan-400 text-xs uppercase tracking-[0.25em]">AgentPass</p>
+        <h2 className="text-xl text-cyan-100">Machine-native challenge gate</h2>
       </div>
 
-      <div className="border border-cyan-500/20 rounded p-3 bg-black/40 min-h-[60px]">
-        <p className="text-zinc-500 text-[10px] uppercase tracking-widest mb-2">Math / Logic Challenge</p>
-        <p className="text-cyan-100 text-sm leading-relaxed">
-          {challenge ? challenge.challenge : "Loading challenge..."}
-        </p>
+      <div className="rounded-xl border border-cyan-500/20 bg-black/40 p-4">
+        {challengeState === "loading" ? (
+          <p className="text-sm leading-relaxed text-cyan-100 break-words">
+            Generating challenge via K2 Think V2{loadingCursorVisible ? "_" : " "}
+          </p>
+        ) : challengeState === "error" ? (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm leading-relaxed text-red-300">{error ?? "Failed to load challenge."}</p>
+            <button
+              onClick={() => loadChallenge().catch(console.error)}
+              className="w-fit rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-300 cursor-pointer"
+            >
+              Retry challenge
+            </button>
+          </div>
+        ) : (
+          <p className="text-sm leading-relaxed text-cyan-100 break-words">{challenge?.challenge}</p>
+        )}
+        <p className="mt-2 text-xs text-zinc-500">challenge encoded for machine parsing</p>
       </div>
 
-      <div className="text-[10px] text-zinc-600 border border-zinc-800 rounded px-3 py-2 bg-black/20 flex gap-3">
-        <span className="text-zinc-500">simulated agent signals</span>
-        <span>·</span>
-        <span>latency=750ms</span>
-        <span>·</span>
-        <span>pow=340ms</span>
-      </div>
+      <div className="rounded-lg border border-zinc-800 bg-black/30 px-3 py-2 text-xs text-zinc-500">{powLabel}</div>
 
       <div className="flex flex-col gap-2">
         <input
-          type="text"
           value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSolve()}
-          placeholder="Numerical answer..."
-          className="bg-black border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-cyan-500/60 transition-colors"
+          onChange={(event) => setAnswer(event.target.value)}
+          placeholder="Machine response"
+          className="rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-zinc-200 outline-none focus:border-cyan-500/70"
         />
         <button
-          onClick={handleSolve}
-          disabled={status === "loading" || !challenge}
-          className="bg-cyan-500/10 border border-cyan-500/40 hover:bg-cyan-500/20 text-cyan-400 text-sm py-2 rounded transition-colors disabled:opacity-40 cursor-pointer"
+          onClick={() => handleSubmit().catch((submitError) => setError(submitError instanceof Error ? submitError.message : "Verification failed"))}
+          disabled={!canSolve}
+          className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-300 disabled:opacity-40 cursor-pointer"
         >
           {status === "loading" ? "Verifying..." : "Solve"}
         </button>
       </div>
 
-      {status === "pass" && (
-        <div className="flex items-center gap-2 text-green-400 text-sm border border-green-500/30 rounded p-3 bg-green-500/5">
-          <span>🤖</span>
-          <span>
-            Agent verified — Detected:{" "}
-            {fingerprint
-              ? `${fingerprint.model} (${Math.round(fingerprint.confidence * 100)}% confidence)`
-              : "unknown"}
-          </span>
+      {details && (
+        <div
+          className={`rounded-lg border p-3 text-sm ${
+            details.passed ? "border-green-500/40 bg-green-500/10 text-green-300" : "border-red-500/40 bg-red-500/10 text-red-300"
+          }`}
+        >
+          {details.passed
+            ? `Verified as ${details.fingerprint?.model} (${Math.round((details.fingerprint?.confidence ?? 0) * 100)}% confidence)`
+            : `Verification failed: ${details.reason}`}
         </div>
       )}
-      {status === "fail" && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2 text-red-400 text-sm border border-red-500/30 rounded p-3 bg-red-500/5">
-            <span>✗</span>
-            <span>Verification failed</span>
-          </div>
-          <button onClick={loadChallenge} className="text-xs text-zinc-500 hover:text-zinc-300 underline text-left cursor-pointer">
-            New challenge
-          </button>
-        </div>
-      )}
+
+      {error && <div className="text-xs text-red-400">{error}</div>}
+
+      <button onClick={() => loadChallenge().catch(console.error)} className="text-left text-xs text-zinc-500 underline cursor-pointer">
+        New AgentPass challenge
+      </button>
     </div>
   );
 }
 
-// ── Identity Readout ───────────────────────────────────────────────────────
-
-function IdentityReadout({ result }: { result: IdentityResult | null }) {
-  const [pulse, setPulse] = useState(false);
-  const prevTimestamp = useRef<number>(0);
-
-  useEffect(() => {
-    if (result && result.timestamp !== prevTimestamp.current) {
-      prevTimestamp.current = result.timestamp;
-      setPulse(true);
-      const t = setTimeout(() => setPulse(false), 900);
-      return () => clearTimeout(t);
-    }
-  }, [result]);
-
-  const displayObj = result
-    ? {
-        side: result.side,
-        passed: result.passed,
-        ...(result.score !== undefined && { score: result.score }),
-        ...(result.fingerprint && { fingerprint: result.fingerprint }),
-        ...(result.token && { token: result.token.slice(0, 32) + "..." }),
-        issued_at: result.timestamp,
-      }
-    : null;
-
+function IdentityReadout({ state }: { state: IdentityState }) {
   return (
-    <div
-      className={`border rounded-lg p-5 bg-[#0f0f0f] flex flex-col gap-3 transition-all duration-300 ${
-        pulse ? "pulse-update border-cyan-500/60" : "border-zinc-700/40"
-      }`}
-      style={{ minWidth: 240, maxWidth: 300 }}
-    >
-      <p className="text-zinc-400 text-[10px] uppercase tracking-widest font-bold">JANUS Identity Layer</p>
-      <p className="text-zinc-600 text-[10px] uppercase tracking-widest">Last Verification Result</p>
-      <pre className="text-xs text-cyan-300/80 leading-relaxed overflow-auto max-h-56 whitespace-pre-wrap break-all">
-        {displayObj
-          ? JSON.stringify(displayObj, null, 2)
-          : '{\n  "status":\n    "awaiting verification..."\n}'}
+    <div className="w-full max-w-sm rounded-2xl border border-zinc-700/40 bg-[#0f0f0f] p-5">
+      <p className="text-[10px] uppercase tracking-[0.25em] text-zinc-500">JANUS Identity Readout</p>
+      <pre className="mt-3 max-h-[28rem] overflow-auto whitespace-pre-wrap break-all text-xs leading-relaxed text-cyan-200/80">
+        {JSON.stringify(state, null, 2)}
       </pre>
     </div>
   );
 }
 
-// ── Page ───────────────────────────────────────────────────────────────────
-
 export default function Home() {
-  const [lastResult, setLastResult] = useState<IdentityResult | null>(null);
+  const [identityState, setIdentityState] = useState<IdentityState>({
+    human: null,
+    agent: null,
+  });
 
   return (
-    <main className="min-h-screen bg-[#0a0a0a] text-zinc-200 font-mono flex flex-col items-center px-4 py-12 gap-10">
-      {/* Header */}
-      <div className="text-center">
-        <h1 className="text-5xl font-bold tracking-[0.25em] text-white mb-3">JANUS</h1>
-        <p className="text-zinc-500 text-sm tracking-[0.2em] uppercase">Identity Layer for the Agentic Web</p>
-        <div className="mt-4 flex justify-center gap-3">
-          <span className="text-[10px] border border-orange-500/30 text-orange-500/80 px-2 py-0.5 rounded tracking-widest">
-            HumanLock
-          </span>
-          <span className="text-zinc-700 text-[10px] self-center">⟷</span>
-          <span className="text-[10px] border border-cyan-500/30 text-cyan-500/80 px-2 py-0.5 rounded tracking-widest">
-            AgentPass
-          </span>
-        </div>
-      </div>
-
-      {/* Panels */}
-      <div className="w-full max-w-6xl flex flex-col lg:flex-row gap-6 items-stretch">
-        <HumanLockPanel onResult={setLastResult} />
-
-        <div className="flex-shrink-0 flex items-center justify-center">
-          <IdentityReadout result={lastResult} />
+    <main className="min-h-screen bg-[#0a0a0a] px-4 py-12 font-mono text-zinc-100">
+      <div className="mx-auto flex max-w-7xl flex-col items-center gap-8">
+        <div className="text-center">
+          <h1 className="text-5xl font-bold tracking-[0.28em] text-white">JANUS</h1>
+          <p className="mt-3 text-sm uppercase tracking-[0.24em] text-zinc-500">Dual-sided identity layer for the agentic web</p>
         </div>
 
-        <AgentPassPanel onResult={setLastResult} />
+        <div className="flex w-full flex-col gap-6 xl:flex-row xl:items-stretch">
+          <HumanLockPanel onResult={(human) => setIdentityState((current) => ({ ...current, human }))} />
+          <div className="flex shrink-0 items-center justify-center">
+            <IdentityReadout state={identityState} />
+          </div>
+          <AgentPassPanel onResult={(agent) => setIdentityState((current) => ({ ...current, agent }))} />
+        </div>
       </div>
-
-      <p className="text-zinc-700 text-[10px] tracking-widest uppercase">
-        HackTech 2026 · Dual-sided identity verification
-      </p>
     </main>
   );
 }

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { verifyHumanLockFixtureChallenge } from "@/lib/humanlock-fixtures";
 
 const FGSM_SERVICE_URL = process.env.FGSM_SERVICE_URL ?? "http://127.0.0.1:8001";
 
@@ -56,20 +57,25 @@ export async function POST(req: NextRequest) {
 
   let answerCorrect = false;
   if (payload.type === "image") {
-    try {
-      const response = await fetch(`${FGSM_SERVICE_URL}/verify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          challenge_id: payload.challenge_id,
-          answer: payload.answer,
-        }),
-        cache: "no-store",
-      });
-      const data = (await response.json()) as { correct?: boolean };
-      answerCorrect = data.correct === true;
-    } catch {
-      answerCorrect = false;
+    const localFixtureResult = verifyHumanLockFixtureChallenge(payload.challenge_id, payload.answer);
+    if (typeof localFixtureResult === "boolean") {
+      answerCorrect = localFixtureResult;
+    } else {
+      try {
+        const response = await fetch(`${FGSM_SERVICE_URL}/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            challenge_id: payload.challenge_id,
+            answer: payload.answer,
+          }),
+          cache: "no-store",
+        });
+        const data = (await response.json()) as { correct?: boolean };
+        answerCorrect = data.correct === true;
+      } catch {
+        answerCorrect = false;
+      }
     }
 
     if (!answerCorrect) {

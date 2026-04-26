@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"backboard-docs": {
+			"type": "http",
+			"url": "https://backboard-docs.docsalot.dev/api/mcp"
+		}
+	},
+	"inputs": []
+}

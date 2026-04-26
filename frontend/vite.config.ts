@@ -6,4 +6,20 @@
 // You can pass additional config via defineConfig({ vite: { ... } }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
-export default defineConfig();
+export default defineConfig({
+  tanstackStart: {
+    router: {
+      autoCodeSplitting: false,
+    },
+  },
+  vite: {
+    server: {
+      proxy: {
+        "/api": {
+          target: process.env.API_PROXY_TARGET ?? "http://localhost:3000",
+          changeOrigin: true,
+        },
+      },
+    },
+  },
+});

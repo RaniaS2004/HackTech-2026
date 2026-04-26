@@ -1,0 +1,79 @@
+import { Link } from "@tanstack/react-router";
+import auroraBot from "@/assets/aurora-bot.png";
+
+export function Hero() {
+  return (
+    <section
+      id="home"
+      className="relative flex min-h-screen items-center overflow-hidden pt-28 pb-16"
+    >
+      {/* Subtle grid background */}
+      <div className="pointer-events-none absolute inset-0 grid-bg animate-grid opacity-40" />
+      {/* Iridescent radial accent */}
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-[600px] w-[900px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/10 blur-[140px]" />
+      <div className="pointer-events-none absolute right-0 top-1/3 h-[400px] w-[400px] rounded-full bg-cyan-500/10 blur-[120px]" />
+
+      <div className="relative mx-auto grid w-full max-w-7xl grid-cols-1 items-center gap-12 px-6 lg:grid-cols-2">
+        {/* Left: text */}
+        <div className="text-left">
+          <div className="mb-6 inline-flex items-center gap-2">
+            <span className="h-px w-6 bg-primary" />
+            <span className="text-xs font-medium uppercase tracking-[0.2em] text-primary">
+              Dual-sided identity layer
+            </span>
+            <span className="h-px w-6 bg-primary" />
+          </div>
+          <h1 className="text-balance text-5xl font-semibold leading-[1.05] tracking-tight sm:text-6xl lg:text-7xl">
+            <span className="text-foreground">The web never knew </span>
+            <span className="text-iridescent">who was really there.</span>
+          </h1>
+          <p className="mt-6 max-w-xl text-balance text-lg text-muted-foreground">
+            AURORA tells humans and AI agents apart — then gives each exactly
+            what they deserve. Block the bots that don't belong. Authorize the
+            ones that do.
+          </p>
+          <div className="mt-10 flex flex-col gap-4 sm:flex-row">
+            <Link
+              to="/humanlock"
+              className="group relative overflow-hidden rounded-xl bg-primary px-8 py-4 text-base font-semibold text-primary-foreground transition-all hover:bg-primary-glow glow-accent"
+            >
+              Try HumanLock
+            </Link>
+            <Link
+              to="/agentpass"
+              className="rounded-xl border border-border bg-secondary/40 px-8 py-4 text-base font-semibold backdrop-blur-md transition-colors hover:bg-secondary hover:border-primary/40"
+            >
+              Try AgentPass
+            </Link>
+          </div>
+        </div>
+
+        {/* Right: bot illustration with expanding rings */}
+        <div className="relative flex aspect-square items-center justify-center">
+          {/* Soft glow */}
+          <div className="absolute inset-[15%] rounded-full bg-primary/20 blur-[80px]" />
+
+          {/* Expanding rings */}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="absolute h-[55%] w-[55%] rounded-full border border-primary/30 animate-ring" />
+            <div className="absolute h-[55%] w-[55%] rounded-full border border-cyan-400/20 animate-ring [animation-delay:1.3s]" />
+            <div className="absolute h-[55%] w-[55%] rounded-full border border-fuchsia-400/20 animate-ring [animation-delay:2.6s]" />
+          </div>
+
+          {/* Stationary bot */}
+          <div className="relative z-10">
+            <div>
+              <img
+                src={auroraBot}
+                alt="AURORA glassy iridescent robot"
+                width={1024}
+                height={1024}
+                className="w-full max-w-md opacity-[0.93] drop-shadow-[0_0_60px_oklch(0.62_0.21_280_/_0.45)]"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}

@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "JANUS — Identity Layer for the Agentic Web",
-  description: "Dual-sided identity verification: HumanLock for humans, AgentPass for AI agents.",
+  title: "AURORA — Identity for the Agentic Web",
+  description: "Dual-sided identity layer that blocks unwanted bots, verifies humans, and issues signed reputation for legitimate AI agents.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

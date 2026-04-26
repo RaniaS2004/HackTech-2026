@@ -2,6 +2,8 @@ import Image from "next/image";
 import Link from "next/link";
 
 export function Hero() {
+  const pills = ["Adversarial CAPTCHA", "Agent verification", "Signed identity"];
+
   return (
     <section id="home" className="relative flex min-h-screen items-center overflow-hidden pb-16 pt-28">
       <div className="pointer-events-none absolute inset-0 grid-bg animate-grid opacity-40" />
@@ -16,11 +18,12 @@ export function Hero() {
             <span className="h-px w-6 bg-primary" />
           </div>
           <h1 className="text-balance text-5xl font-semibold leading-[1.05] tracking-tight sm:text-6xl lg:text-7xl">
-            <span className="text-foreground">The web never knew </span>
-            <span className="text-iridescent">who was really there.</span>
+            <span className="text-foreground">Know who is </span>
+            <span className="text-iridescent">really</span>
+            <span className="text-foreground"> on your site.</span>
           </h1>
           <p className="mt-6 max-w-xl text-balance text-lg text-muted-foreground">
-            AURORA tells humans and AI agents apart, then gives each exactly what they deserve. Block the bots that don&apos;t belong. Authorize the ones that do.
+            AURORA separates humans from AI agents. Block bots that should not get in, and verify trusted agents with signed identity.
           </p>
           <div className="mt-10 flex flex-col gap-4 sm:flex-row">
             <Link
@@ -35,6 +38,14 @@ export function Hero() {
             >
               Try AgentPass
             </Link>
+          </div>
+          <div className="mt-8 flex flex-wrap gap-3">
+            {pills.map((pill) => (
+              <span key={pill} className="inline-flex items-center gap-2 rounded-full border border-border bg-background/60 px-3 py-1.5 text-xs font-medium text-muted-foreground backdrop-blur-sm">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                {pill}
+              </span>
+            ))}
           </div>
         </div>
 
